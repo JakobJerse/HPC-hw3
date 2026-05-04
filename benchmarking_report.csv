@@ -1,0 +1,17 @@
+N,Implementation,AvgTime_Seconds,BestBlockSize
+rm -f lennard-jones.o gifenc.o main.o lj.out
+1000,Sequential,31.525400,N/A
+rm -f lennard-jones.o gifenc.o main.o lj.out
+1000,Parallel,1.132800,size:
+rm -f lennard-jones.o gifenc.o main.o lj.out
+2000,Sequential,113.689200,N/A
+rm -f lennard-jones.o gifenc.o main.o lj.out
+2000,Parallel,1.806800,size:
+rm -f lennard-jones.o gifenc.o main.o lj.out
+4000,Sequential,427.715600,N/A
+rm -f lennard-jones.o gifenc.o main.o lj.out
+4000,Parallel,3.144200,size:
+rm -f lennard-jones.o gifenc.o main.o lj.out
+8000,Sequential,1659.885000,N/A
+rm -f lennard-jones.o gifenc.o main.o lj.out
+8000,Parallel,5.608600,size:
