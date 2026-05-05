@@ -1,38 +1,3 @@
-/*
- * lennard-jones.cu  –  CUDA parallel 2-D Lennard-Jones simulation
- *
- * Design summary
- * --------------
- *  Memory layout
- *    Particles arrive as AoS (struct Particle).  They are converted to SoA
- *    (six separate double* arrays) before upload so that every kernel reads
- *    and writes coalesced memory.
- *
- *  GPU residency
- *    All six arrays live on the device for the entire simulation loop.
- *    Data crosses PCIe exactly once at the start (upload) and once at the
- *    end (download).  The only additional host<->device traffic per step is
- *    two double scalars when energy logging is enabled.
- *
- *  Kernels
- *    compute_forces_kernel  - 1 thread per particle i; inner loop over all j.
- *                             PE is accumulated with atomicAdd into a single
- *                             device double so no separate reduction pass is
- *                             needed.
- *    leapfrog_half_kick     - 1 thread per particle, v += 0.5*dt*f.
- *    leapfrog_drift         - 1 thread per particle, x += dt*v + PBC wrap.
- *    compute_ke_kernel      - 1 thread per particle, KE via atomicAdd.
- *
- *  Block-size auto-tuning
- *    autotune_block_size() benchmarks {32,64,128,256,512,1024} on the force
- *    kernel (dominant cost) and selects the fastest for the full run.
- *
- *  Reference functions
- *    initialize_particles, wrap_positions, compute_v_shift, compute_forces,
- *    and leapfrog_step are kept identical to the sequential reference so the
- *    header contract is fully satisfied.
- */
-
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,9 +8,7 @@
 
 #include "lennard-jones.h"
 
-/* ------------------------------------------------------------------ */
-/*  CUDA error-checking macro                                          */
-/* ------------------------------------------------------------------ */
+
 #define CHECK(call)                                                        \
     do {                                                                   \
         cudaError_t _err = (call);                                         \
@@ -56,30 +19,13 @@
         }                                                                  \
     } while (0)
 
-/* ------------------------------------------------------------------ */
-/*  Device constants (read from fast constant cache)                   */
-/* ------------------------------------------------------------------ */
+// Device constants
 __constant__ double c_dt      = DT;
 __constant__ double c_epsilon = EPSILON;
 __constant__ double c_sigma   = SIGMA;
 __constant__ double c_r_cut   = R_CUT;
 
-/* ================================================================== */
-/*  KERNELS                                                            */
-/* ================================================================== */
-
-/*
- * compute_forces_kernel
- *
- * One thread handles one particle i.  It iterates over every other particle
- * j, applies the minimum-image convention, and accumulates:
- *   - the net force components (fx[i], fy[i])
- *   - 0.5 * V_shifted(r_ij) into the global PE scalar via atomicAdd
- *
- * fij_over_r2 = 24*eps/r^2 * [2*(sigma/r)^12 - (sigma/r)^6]
- * so force components are simply fij_over_r2 * dx and fij_over_r2 * dy,
- * avoiding a sqrt in the force path (only r2 is needed).
- */
+// KERNELS
 __global__ void compute_forces_kernel(
         const double * __restrict__ x,
         const double * __restrict__ y,
@@ -108,7 +54,6 @@ __global__ void compute_forces_kernel(
         double dx = xi - x[j];
         double dy = yi - y[j];
 
-        /* minimum-image convention: fold into (-L/2, L/2] */
         if      (dx >  half_L) dx -= box_size;
         else if (dx < -half_L) dx += box_size;
         if      (dy >  half_L) dy -= box_size;
@@ -117,18 +62,15 @@ __global__ void compute_forces_kernel(
         double r2 = dx * dx + dy * dy;
         if (r2 >= r_cut2 || r2 == 0.0) continue;
 
-        /* (sigma/r)^2, ^6, ^12 computed without sqrt */
         double r2inv = 1.0 / r2;
         double sr2   = sig2 * r2inv;
         double sr6   = sr2 * sr2 * sr2;
         double sr12  = sr6 * sr6;
 
-        /* force: F/r^2 * (dx, dy) */
         double fij_r2 = 24.0 * eps * (2.0 * sr12 - sr6) * r2inv;
         fxi  += fij_r2 * dx;
         fyi  += fij_r2 * dy;
 
-        /* shifted potential with 0.5 for double-counting */
         pe_i += 0.5 * (4.0 * eps * (sr12 - sr6) - v_shift);
     }
 
@@ -137,10 +79,6 @@ __global__ void compute_forces_kernel(
     atomicAdd(pe_out, pe_i);
 }
 
-/*
- * leapfrog_half_kick
- * v(t +/- dt/2) = v(t) + 0.5*dt * f(t)
- */
 __global__ void leapfrog_half_kick(
         double       * __restrict__ vx,
         double       * __restrict__ vy,
@@ -155,10 +93,7 @@ __global__ void leapfrog_half_kick(
     vy[i] += hdt * fy[i];
 }
 
-/*
- * leapfrog_drift
- * x(t+dt) = x(t) + dt*v(t+dt/2), with periodic boundary conditions.
- */
+
 __global__ void leapfrog_drift(
         double       * __restrict__ x,
         double       * __restrict__ y,
@@ -173,7 +108,6 @@ __global__ void leapfrog_drift(
     double xi = x[i] + c_dt * vx[i];
     double yi = y[i] + c_dt * vy[i];
 
-    /* wrap into [0, box_size) */
     xi = fmod(xi, box_size); if (xi < 0.0) xi += box_size;
     yi = fmod(yi, box_size); if (yi < 0.0) yi += box_size;
 
@@ -181,10 +115,6 @@ __global__ void leapfrog_drift(
     y[i] = yi;
 }
 
-/*
- * compute_ke_kernel
- * Accumulates KE = sum_i 0.5*(vx^2 + vy^2) via atomicAdd.
- */
 __global__ void compute_ke_kernel(
         const double * __restrict__ vx,
         const double * __restrict__ vy,
@@ -195,10 +125,6 @@ __global__ void compute_ke_kernel(
     if (i >= n) return;
     atomicAdd(ke_out, 0.5 * (vx[i] * vx[i] + vy[i] * vy[i]));
 }
-
-/* ================================================================== */
-/*  Block-size auto-tuner                                              */
-/* ================================================================== */
 
 static int autotune_block_size(unsigned int n, double box_size, double v_shift)
 {
@@ -257,9 +183,6 @@ static int autotune_block_size(unsigned int n, double box_size, double v_shift)
     return best_bs;
 }
 
-/* ================================================================== */
-/*  Reference sequential functions (required by lennard-jones.h)      */
-/* ================================================================== */
 
 double random_double(void) {
     return (double)rand() / (double)RAND_MAX;
@@ -370,9 +293,7 @@ double leapfrog_step(Particle *particles, unsigned int n, double box_size) {
     return pe;
 }
 
-/* ================================================================== */
-/*  run_simulation  -  GPU parallel main entry point                  */
-/* ================================================================== */
+// Simulation
 SimulationResult run_simulation(Particle *particles, unsigned int n,
                                 unsigned int nsteps, double box_size, int log_steps)
 {
@@ -383,7 +304,7 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
     const double v_shift = compute_v_shift();
     const double zero    = 0.0;
 
-    /* ---- flatten AoS -> SoA ---- */
+    // flatten AoS -> SoA
     double *h_x  = (double *)malloc(sz);
     double *h_y  = (double *)malloc(sz);
     double *h_vx = (double *)malloc(sz);
@@ -405,7 +326,6 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
         h_fy[i] = 0.0;
     }
 
-    /* ---- device allocation ---- */
     double *d_x, *d_y, *d_vx, *d_vy, *d_fx, *d_fy, *d_pe, *d_ke;
     CHECK(cudaMalloc(&d_x,  sz)); CHECK(cudaMalloc(&d_y,  sz));
     CHECK(cudaMalloc(&d_vx, sz)); CHECK(cudaMalloc(&d_vy, sz));
@@ -413,7 +333,6 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
     CHECK(cudaMalloc(&d_pe, sizeof(double)));
     CHECK(cudaMalloc(&d_ke, sizeof(double)));
 
-    /* ---- upload (included in host wall-clock per assignment spec) ---- */
     CHECK(cudaMemcpy(d_x,  h_x,  sz, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_y,  h_y,  sz, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(d_vx, h_vx, sz, cudaMemcpyHostToDevice));
@@ -421,12 +340,10 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
     CHECK(cudaMemset(d_fx, 0, sz));
     CHECK(cudaMemset(d_fy, 0, sz));
 
-    /* ---- auto-tune block size ---- */
     int  bs  = autotune_block_size(n, box_size, v_shift);
     dim3 blk(bs);
     dim3 grd((n + bs - 1) / bs);
 
-    /* ---- initial forces + starting energies ---- */
     CHECK(cudaMemcpy(d_pe, &zero, sizeof(double), cudaMemcpyHostToDevice));
     compute_forces_kernel<<<grd, blk>>>(d_x, d_y, d_fx, d_fy, d_pe, n, box_size, v_shift);
     CHECK(cudaGetLastError());
@@ -443,37 +360,27 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
     out.start_kinetic   = start_ke;
     out.start_total     = start_ke + start_pe;
 
-    /* ================================================================
-     *  Leapfrog loop
-     *  Step:  half-kick -> drift+PBC -> forces -> half-kick
-     * ============================================================= */
     double final_pe = start_pe;
     double final_ke = start_ke;
 
     for (unsigned int step = 0; step < nsteps; ++step) {
 
-        /* 1 - half velocity kick */
         leapfrog_half_kick<<<grd, blk>>>(d_vx, d_vy, d_fx, d_fy, n);
         CHECK(cudaGetLastError());
 
-        /* 2 - position update + periodic boundary conditions */
         leapfrog_drift<<<grd, blk>>>(d_x, d_y, d_vx, d_vy, n, box_size);
         CHECK(cudaGetLastError());
 
-        /* 3 - force recompute; zero PE accumulator first */
         CHECK(cudaMemcpy(d_pe, &zero, sizeof(double), cudaMemcpyHostToDevice));
         compute_forces_kernel<<<grd, blk>>>(d_x, d_y, d_fx, d_fy, d_pe, n, box_size, v_shift);
         CHECK(cudaGetLastError());
 
-        /* 4 - second half kick */
         leapfrog_half_kick<<<grd, blk>>>(d_vx, d_vy, d_fx, d_fy, n);
         CHECK(cudaGetLastError());
 
-        /* synchronise before any host reads */
         if (log_steps || step == nsteps - 1)
             CHECK(cudaDeviceSynchronize());
 
-        /* optional per-step energy output */
         if (log_steps) {
             CHECK(cudaMemcpy(&final_pe, d_pe, sizeof(double), cudaMemcpyDeviceToHost));
 
@@ -487,7 +394,6 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
         }
     }
 
-    /* collect final energies when not logging */
     if (!log_steps) {
         CHECK(cudaMemcpy(&final_pe, d_pe, sizeof(double), cudaMemcpyDeviceToHost));
 
@@ -501,7 +407,6 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
     out.final_kinetic   = final_ke;
     out.final_total     = final_ke + final_pe;
 
-    /* ---- download final state ---- */
     CHECK(cudaMemcpy(h_x,  d_x,  sz, cudaMemcpyDeviceToHost));
     CHECK(cudaMemcpy(h_y,  d_y,  sz, cudaMemcpyDeviceToHost));
     CHECK(cudaMemcpy(h_vx, d_vx, sz, cudaMemcpyDeviceToHost));
@@ -509,7 +414,7 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
     CHECK(cudaMemcpy(h_fx, d_fx, sz, cudaMemcpyDeviceToHost));
     CHECK(cudaMemcpy(h_fy, d_fy, sz, cudaMemcpyDeviceToHost));
 
-    /* write back SoA -> AoS */
+    // SoA -> AoS
     for (unsigned int i = 0; i < n; ++i) {
         particles[i].x  = h_x[i];
         particles[i].y  = h_y[i];
@@ -522,7 +427,6 @@ SimulationResult run_simulation(Particle *particles, unsigned int n,
     out.n         = n;
     out.particles = particles;
 
-    /* ---- cleanup ---- */
     CHECK(cudaFree(d_x));  CHECK(cudaFree(d_y));
     CHECK(cudaFree(d_vx)); CHECK(cudaFree(d_vy));
     CHECK(cudaFree(d_fx)); CHECK(cudaFree(d_fy));
