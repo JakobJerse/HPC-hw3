@@ -1,0 +1,11 @@
+rm -f gifenc.o lennard-jones_openmp.o main.o lj.out
+nvcc -Wno-deprecated-gpu-targets -gencode=arch=compute_70,code=sm_70 -O3 -Xcompiler --openmp,-Wall -c -o gifenc.o src/gifenc.c
+nvcc -Wno-deprecated-gpu-targets -gencode=arch=compute_70,code=sm_70 -O3 -Xcompiler --openmp,-Wall -c -o lennard-jones_openmp.o src/lennard-jones_openmp.c
+nvcc -Wno-deprecated-gpu-targets -gencode=arch=compute_70,code=sm_70 -O3 -Xcompiler --openmp,-Wall -c -o main.o src/main.c
+nvcc -Wno-deprecated-gpu-targets -gencode=arch=compute_70,code=sm_70 -O3 -Xcompiler --openmp,-Wall gifenc.o lennard-jones_openmp.o main.o -o lj.out -lm
+Starting Benchmark: 5 trials per particle count using 24 cores.
+------------------------------------------------
+  Trial ...
+/var/spool/slurm/job14857209/slurm_script: line 37: ./src/results/raw/lj_8000_gif.log: No such file or directory
+/var/spool/slurm/job14857209/slurm_script: line 40: unexpected EOF while looking for matching `"'
+/var/spool/slurm/job14857209/slurm_script: line 41: syntax error: unexpected end of file

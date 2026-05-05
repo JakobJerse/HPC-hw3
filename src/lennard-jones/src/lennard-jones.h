@@ -11,13 +11,13 @@ extern "C" {
 #define R_CUT 2.5
 #define JITTER 0.05
 
-#define GENERATE_GIF 0
+#define GENERATE_GIF 1
 #define FRAME_WIDTH 800
 #define FRAME_HEIGHT 800
 #define FRAME_EVERY 5
 #define FRAME_PARTICLE_RADIUS 2
 #define FRAME_DELAY 3
-#define GIF_FILE "simulation.gif"
+#define GIF_FILE "simulation_openmp_1000.gif"
 
 
 
